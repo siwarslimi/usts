@@ -1,0 +1,104 @@
+name: mail-assistant
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mail
+      POSTGRES_USER: mail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mail -d mail"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://mail:${POSTGRES_PASSWORD}@db:5432/mail
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Paris}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET manquant dans .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD manquant dans .env}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?WEBHOOK_SECRET manquant dans .env}
+      WEBHOOK_HMAC_REQUIRED: ${WEBHOOK_HMAC_REQUIRED:-true}
+      REPLY_TRANSPORT: ${REPLY_TRANSPORT:-mock}
+      N8N_SEND_WEBHOOK_URL: http://n8n:5678/webhook/send-reply
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.8-27b}
+    # Not published on the host: only the web front (nginx) and n8n reach it.
+    expose:
+      - "8000"
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+  # Imports the workflow exports once (first start), then activates them.
+  n8n-import:
+    build: ./n8n
+    image: mail-assistant-n8n:local
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -f /home/node/.n8n/.workflows-imported ]; then echo "Workflows déjà importés"; exit 0; fi
+        ls /workflows/*.json > /dev/null &&
+        n8n import:workflow --separate --input=/workflows &&
+        n8n update:workflow --id=MailClassifyAI01 --active=true &&
+        n8n update:workflow --id=MailSendReply001 --active=true &&
+        touch /home/node/.n8n/.workflows-imported
+    environment: &n8n-env
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY manquant dans .env}
+      GENERIC_TIMEZONE: ${APP_TIMEZONE:-Europe/Paris}
+      TZ: ${APP_TIMEZONE:-Europe/Paris}
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      # Workflows read their secrets from the environment, never from the exports
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_RUNNERS_ENABLED: "true"
+      DB_SQLITE_POOL_SIZE: "2"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      BACKEND_URL: http://backend:8000
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.8-27b}
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  n8n:
+    image: mail-assistant-n8n:local
+    restart: unless-stopped
+    depends_on:
+      n8n-import:
+        condition: service_completed_successfully
+      backend:
+        condition: service_healthy
+    environment: *n8n-env
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  db_data:
+  n8n_data:
