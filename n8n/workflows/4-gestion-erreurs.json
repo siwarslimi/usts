@@ -1,0 +1,112 @@
+{
+  "id": "MailErrorHandl01",
+  "name": "Mail – 4. Gestion des erreurs",
+  "active": false,
+  "nodes": [
+    {
+      "id": "991ef61e-e92c-5424-beb3-d2eb9a29ddb4",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -280
+      ],
+      "parameters": {
+        "content": "## Workflow d'erreur\nDéclaré comme *Error workflow* des 3 autres. Enregistre chaque échec auprès du backend (visible dans `GET /api/stats`).\nUne synchronisation en échec est marquée `failed` : **le curseur n'avance pas**, les e-mails seront relus au passage suivant.",
+        "width": 480,
+        "height": 220
+      }
+    },
+    {
+      "id": "c5c55168-60ae-5d6f-b20a-848035f7d1ad",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        80
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "4bfdba9e-5065-5215-84a9-31d4186da89b",
+      "name": "Signer : erreur",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst e = $input.first().json;\nconst payload = JSON.stringify({\n  workflow: (e.workflow && e.workflow.name) || 'inconnu',\n  node: (e.execution && e.execution.lastNodeExecuted) || null,\n  message: String((e.execution && e.execution.error && e.execution.error.message) || (e.trigger && e.trigger.error && e.trigger.error.message) || 'Erreur inconnue').slice(0, 900),\n  execution_id: e.execution && e.execution.id ? String(e.execution.id) : null,\n});\nreturn [{ json: { payload, signature: sign(payload) } }];"
+      }
+    },
+    {
+      "id": "10edfb5d-8dab-5a5b-b776-df519b7d93f6",
+      "name": "Backend : enregistrer l'échec",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/errors",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Signer : erreur",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : erreur": {
+      "main": [
+        [
+          {
+            "node": "Backend : enregistrer l'échec",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

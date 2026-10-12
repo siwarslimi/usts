@@ -1,0 +1,519 @@
+{
+  "id": "MailClassifyAI01",
+  "name": "Mail – 2. Classification IA (Groq)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "353e5705-adfa-5354-b35b-fb035d00bd02",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -340
+      ],
+      "parameters": {
+        "content": "## Classification par IA\n- Récupère les e-mails **en attente** (contenu déjà masqué : téléphones, IBAN).\n- **Un appel à la fois** + pause de 2 s entre deux appels.\n- Erreur HTTP (dont **429 quota**) : 3 essais espacés de 5 s, puis pause de 60 s et reprise sur l'e-mail suivant ; l'e-mail reste en attente et sera repris au prochain passage.\n- Le **backend valide** la sortie JSON : `ok`, `retry` (une seule nouvelle tentative) ou `fallback` (« autre » + à vérifier).\n\nClé : variable d'environnement `GROQ_API_KEY` (jamais stockée dans le workflow).",
+        "width": 560,
+        "height": 300
+      }
+    },
+    {
+      "id": "73a84914-6d2a-53f4-8f86-ec0b54b06855",
+      "name": "Toutes les 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        80
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9891baee-f56e-548a-a4e6-d815771f3d11",
+      "name": "Clé IA configurée ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$env.GROQ_API_KEY }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ec674072-b605-54d0-ad54-3c2aecd3ce61",
+      "name": "Backend : e-mails à classer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        80
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/classification/pending?limit=10",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "25a9a193-a476-516a-b7da-9030d447d190",
+      "name": "Au moins un e-mail ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        400,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ !!$json.id }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "6339022f-42d6-550a-a2a4-24a8145d6084",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        620,
+        80
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "712caa8b-ecfa-52da-a03a-a916bfd8892c",
+      "name": "Groq : classer (essai 1)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: $env.GROQ_MODEL || 'qwen/qwen3.8-27b', temperature: 0.2, response_format: { type: 'json_object' }, max_tokens: 300, messages: [{ role: 'system', content: \"Tu classes des e-mails professionnels reçus par une petite entreprise française. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte autour, exactement de la forme {\\\"category\\\": \\\"...\\\", \\\"priority\\\": 1, \\\"summary\\\": \\\"...\\\", \\\"action\\\": \\\"...\\\"}. category : une valeur parmi \\\"client\\\", \\\"facture\\\", \\\"rendez-vous\\\", \\\"newsletter\\\", \\\"spam probable\\\", \\\"autre\\\". priority : entier 1 (urgent), 2 (normal) ou 3 (faible). summary : une seule phrase en français résumant l'e-mail. action : l'action attendue de l'utilisateur, en quelques mots.\" }, { role: 'user', content: 'Expéditeur : ' + $json.from_email + '\\nObjet : ' + $json.subject + '\\n\\n' + $json.text }] }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "2956686b-1df0-5c47-9260-79d1579890d5",
+      "name": "Signer : essai 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst email = $('Loop Over Items').item.json;\nconst raw = ($json.choices && $json.choices[0] && $json.choices[0].message && $json.choices[0].message.content) || '';\nconst payload = JSON.stringify({ email_id: email.id, raw_output: raw, attempt: 1 });\nreturn { json: { payload, signature: sign(payload) } };",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "7dc0614b-fdb0-5507-8253-8ab57afc9a48",
+      "name": "Backend : valider essai 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/classification",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    },
+    {
+      "id": "15551532-a5cc-5ec3-aa4f-788783f59d24",
+      "name": "Nouvelle tentative demandée ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1520,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.result === 'retry' }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "51716462-fb11-597e-8b84-3dab54f3fda5",
+      "name": "Groq : classer (essai 2)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1740,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ model: $env.GROQ_MODEL || 'qwen/qwen3.8-27b', temperature: 0.2, response_format: { type: 'json_object' }, max_tokens: 300, messages: [{ role: 'system', content: \"Tu classes des e-mails professionnels reçus par une petite entreprise française. Réponds UNIQUEMENT avec un objet JSON valide, sans aucun texte autour, exactement de la forme {\\\"category\\\": \\\"...\\\", \\\"priority\\\": 1, \\\"summary\\\": \\\"...\\\", \\\"action\\\": \\\"...\\\"}. category : une valeur parmi \\\"client\\\", \\\"facture\\\", \\\"rendez-vous\\\", \\\"newsletter\\\", \\\"spam probable\\\", \\\"autre\\\". priority : entier 1 (urgent), 2 (normal) ou 3 (faible). summary : une seule phrase en français résumant l'e-mail. action : l'action attendue de l'utilisateur, en quelques mots.\" + ' ATTENTION : ta réponse précédente était invalide (' + ($json.error || 'format') + '). Respecte strictement le format JSON demandé.' }, { role: 'user', content: 'Expéditeur : ' + $('Loop Over Items').item.json.from_email + '\\nObjet : ' + $('Loop Over Items').item.json.subject + '\\n\\n' + $('Loop Over Items').item.json.text }] }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "b5c85132-071d-58c1-ae5a-5cbba9841b82",
+      "name": "Signer : essai 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1960,
+        -160
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst email = $('Loop Over Items').item.json;\nconst raw = ($json.choices && $json.choices[0] && $json.choices[0].message && $json.choices[0].message.content) || '';\nconst payload = JSON.stringify({ email_id: email.id, raw_output: raw, attempt: 2 });\nreturn { json: { payload, signature: sign(payload) } };",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "51dbe5ac-7236-5973-aaae-e1c84724aa81",
+      "name": "Backend : valider essai 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2180,
+        -160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/classification",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    },
+    {
+      "id": "0a622eb0-3c0e-5b9d-a360-f3f94b2cd404",
+      "name": "Pause entre deux appels (2 s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2400,
+        60
+      ],
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "117bde8e-6c34-5425-806c-56bf7a327281"
+    },
+    {
+      "id": "f8f9c538-ebd0-5648-9cff-5c71558c37ed",
+      "name": "Pause quota / erreur (60 s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1300,
+        260
+      ],
+      "parameters": {
+        "amount": 60,
+        "unit": "seconds"
+      },
+      "webhookId": "fe57b893-af22-54ed-abfa-f15fdd9a0602"
+    }
+  ],
+  "connections": {
+    "Toutes les 2 minutes": {
+      "main": [
+        [
+          {
+            "node": "Clé IA configurée ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clé IA configurée ?": {
+      "main": [
+        [
+          {
+            "node": "Backend : e-mails à classer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend : e-mails à classer": {
+      "main": [
+        [
+          {
+            "node": "Au moins un e-mail ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Au moins un e-mail ?": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Groq : classer (essai 1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq : classer (essai 1)": {
+      "main": [
+        [
+          {
+            "node": "Signer : essai 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pause quota / erreur (60 s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : essai 1": {
+      "main": [
+        [
+          {
+            "node": "Backend : valider essai 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend : valider essai 1": {
+      "main": [
+        [
+          {
+            "node": "Nouvelle tentative demandée ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nouvelle tentative demandée ?": {
+      "main": [
+        [
+          {
+            "node": "Groq : classer (essai 2)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pause entre deux appels (2 s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq : classer (essai 2)": {
+      "main": [
+        [
+          {
+            "node": "Signer : essai 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pause quota / erreur (60 s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : essai 2": {
+      "main": [
+        [
+          {
+            "node": "Backend : valider essai 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend : valider essai 2": {
+      "main": [
+        [
+          {
+            "node": "Pause entre deux appels (2 s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause entre deux appels (2 s)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pause quota / erreur (60 s)": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "MailErrorHandl01"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

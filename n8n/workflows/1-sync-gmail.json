@@ -1,0 +1,496 @@
+{
+  "id": "MailSyncGmail001",
+  "name": "Mail – 1. Synchronisation Gmail (toutes les 10 min)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "4d94ec38-c010-57f4-998e-84dc58f51eb2",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -320
+      ],
+      "parameters": {
+        "content": "## Synchronisation incrémentale\n1. Le backend fournit le **curseur** (date de début de la dernière synchro réussie, moins 5 min de recouvrement).\n2. Liste Gmail paginée (`nextPageToken`).\n3. Le backend indique les messages **déjà importés** : seuls les nouveaux sont lus dans Gmail.\n4. Lecture lente (1 message / 1,1 s) pour le quota Gmail ; un message refusé n'interrompt pas la synchro.\n5. Envoi au backend par **lots de 25**, signés HMAC. Les doublons sont ignorés côté backend (clé : id Gmail).\n6. Clôture : le curseur n'avance que si **tous** les messages ont été lus ; sinon les manquants sont repris au passage suivant.\n\nIdentifiant Gmail : credential **Gmail OAuth2** à sélectionner sur les 2 nœuds Gmail.",
+        "width": 520,
+        "height": 280
+      }
+    },
+    {
+      "id": "0b9f997a-6df4-56e4-8f66-b6d6f6ebb131",
+      "name": "Toutes les 10 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -260,
+        80
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a5f5c3e1-9eb7-57af-b677-d232c45b2b9e",
+      "name": "Signer : début",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst payload = JSON.stringify({ source: 'gmail' });\nreturn [{ json: { payload, signature: sign(payload) } }];"
+      }
+    },
+    {
+      "id": "7c4befd6-7e9e-5371-b522-97137de50212",
+      "name": "Start sync run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/sync-runs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    },
+    {
+      "id": "30f5d855-b766-5862-aab2-ddb2527fc2ea",
+      "name": "Gmail : lister les messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        80
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "pageToken",
+                    "value": "={{ $response.body.nextPageToken }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextPageToken }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.gmail_query }}"
+            },
+            {
+              "name": "maxResults",
+              "value": "100"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b28a18c5-1919-52dc-b18a-a19cafab2da3",
+      "name": "Collect message IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\n// Every page of the Gmail listing is one item: flatten and de-duplicate\nconst ids = [];\nfor (const page of $input.all()) for (const m of (page.json.messages || [])) ids.push(m.id);\nconst payload = JSON.stringify({ gmail_ids: [...new Set(ids)] });\nreturn [{ json: { payload, signature: sign(payload) } }];"
+      }
+    },
+    {
+      "id": "142cb31a-1b2c-56b5-a8f4-8eef71048adf",
+      "name": "Backend : messages déjà importés ?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/emails/unknown",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    },
+    {
+      "id": "6215c4b5-65a9-57c9-93ae-22e3c66af875",
+      "name": "Un item par nouveau message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Only messages the backend does not have yet are read from Gmail (saves quota)\nconst unknown = $input.first().json.unknown || [];\nreturn unknown.length ? unknown.map(id => ({ json: { id, count: unknown.length } })) : [{ json: { count: 0 } }];"
+      }
+    },
+    {
+      "id": "bd8cc521-8e60-5b99-83e9-007fafc73a54",
+      "name": "Nouveaux messages ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.count > 0 }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "11d045a9-b2cb-5b65-a5e0-e006598eddb6",
+      "name": "Gmail : lire le message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        -20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1100
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "format",
+              "value": "full"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "82bb7dd8-39dc-5adc-a126-9f403cfb7085",
+      "name": "Extraire les champs + lots de 25",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1720,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst runId = $('Start sync run').first().json.run_id;\nconst header = (h, n) => (h.find(x => x.name.toLowerCase() === n) || {}).value || '';\nconst decode = d => Buffer.from(d.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');\nfunction findPart(p, mime) {\n  if (!p) return null;\n  if (p.mimeType === mime && p.body && p.body.data) return p.body.data;\n  for (const c of p.parts || []) { const r = findPart(c, mime); if (r) return r; }\n  return null;\n}\nconst addr = s => { const m = (s || '').match(/^\\s*\"?([^\"<]*?)\"?\\s*<([^>]+)>/); return m ? { name: m[1].trim(), email: m[2].trim() } : { name: '', email: (s || '').trim() }; };\nconst list = s => s ? s.split(',').map(x => addr(x).email).filter(Boolean) : [];\nconst htmlToText = html => html.replace(/<(style|script)[\\s\\S]*?<\\/\\1>/gi, '').replace(/<br\\s*\\/?>/gi, '\\n').replace(/<\\/p>/gi, '\\n\\n')\n  .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/[ \\t]+/g, ' ').replace(/\\n\\s+\\n/g, '\\n\\n').trim();\n\n// Messages Gmail refused to return (quota...) arrive as { error }: skipped here, re-read next run\nconst ok = $input.all().filter(({ json }) => json && json.id && json.payload);\nconst failed = $input.all().length - ok.length;\nconst emails = ok.map(({ json: m }) => {\n  const h = (m.payload && m.payload.headers) || [];\n  const plain = findPart(m.payload, 'text/plain');\n  const html = findPart(m.payload, 'text/html');\n  const body = plain ? decode(plain) : html ? htmlToText(decode(html)) : (m.snippet || '');\n  const from = addr(header(h, 'from'));\n  return {\n    gmail_message_id: m.id,\n    gmail_thread_id: m.threadId,\n    from_name: from.name,\n    from_email: from.email,\n    to: list(header(h, 'to')),\n    cc: list(header(h, 'cc')),\n    subject: header(h, 'subject'),\n    body_text: body.slice(0, 50000),\n    received_at: new Date(Number(m.internalDate)).toISOString(),\n    rfc_message_id: header(h, 'message-id') || null,\n    references: header(h, 'references') || null,\n  };\n});\n\nconst out = [];\n// Always at least one (possibly empty) batch, so the run is always closed\nfor (let i = 0; i < Math.max(emails.length, 1); i += 25) {\n  const payload = JSON.stringify({ run_id: runId, emails: emails.slice(i, i + 25) });\n  out.push({ json: { payload, signature: sign(payload), failed } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "d07b291d-9684-5e95-bbe0-8b5882c3b1aa",
+      "name": "Backend : enregistrer le lot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1940,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 200
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    },
+    {
+      "id": "23ca6318-fcef-5e86-80dc-6a2adfe3be71",
+      "name": "Signer : fin",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst runId = $('Start sync run').first().json.run_id;\nconst fetched = $('Backend : messages déjà importés ?').first().json.total || 0;\nlet failed = 0;\ntry { failed = $('Extraire les champs + lots de 25').first().json.failed || 0; } catch (e) { /* nothing new this run */ }\n// The cursor only moves when every message was read\nconst payload = JSON.stringify(failed\n  ? { status: 'failed', fetched_count: fetched, error: failed + ' message(s) non lus (quota Gmail), repris au prochain passage' }\n  : { status: 'success', fetched_count: fetched });\nreturn [{ json: { payload, signature: sign(payload), run_id: runId } }];"
+      }
+    },
+    {
+      "id": "7f4c53e4-047c-5998-80be-c75b79e879e5",
+      "name": "Finish sync run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2380,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/sync-runs/{{ $json.run_id }}/finish",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    }
+  ],
+  "connections": {
+    "Toutes les 10 minutes": {
+      "main": [
+        [
+          {
+            "node": "Signer : début",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : début": {
+      "main": [
+        [
+          {
+            "node": "Start sync run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start sync run": {
+      "main": [
+        [
+          {
+            "node": "Gmail : lister les messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail : lister les messages": {
+      "main": [
+        [
+          {
+            "node": "Collect message IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect message IDs": {
+      "main": [
+        [
+          {
+            "node": "Backend : messages déjà importés ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend : messages déjà importés ?": {
+      "main": [
+        [
+          {
+            "node": "Un item par nouveau message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Un item par nouveau message": {
+      "main": [
+        [
+          {
+            "node": "Nouveaux messages ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nouveaux messages ?": {
+      "main": [
+        [
+          {
+            "node": "Gmail : lire le message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signer : fin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail : lire le message": {
+      "main": [
+        [
+          {
+            "node": "Extraire les champs + lots de 25",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraire les champs + lots de 25": {
+      "main": [
+        [
+          {
+            "node": "Backend : enregistrer le lot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backend : enregistrer le lot": {
+      "main": [
+        [
+          {
+            "node": "Signer : fin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : fin": {
+      "main": [
+        [
+          {
+            "node": "Finish sync run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "MailErrorHandl01"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

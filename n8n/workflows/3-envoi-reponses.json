@@ -1,0 +1,314 @@
+{
+  "id": "MailSendReply001",
+  "name": "Mail – 3. Envoi des réponses",
+  "active": false,
+  "nodes": [
+    {
+      "id": "5e32b80a-9a6c-56c7-bc20-b76c8072e105",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -320
+      ],
+      "parameters": {
+        "content": "## Envoi d'une réponse\nDéclenché **uniquement par le backend** (jamais par le site).\n1. Vérifie le secret partagé **et** la signature HMAC du corps ; sinon 401.\n2. Construit le message MIME avec `In-Reply-To` / `References` et l'envoie avec le `threadId` : la réponse reste **dans le même fil Gmail**.\n3. Renvoie le statut (`sent` ou `failed`) au backend.",
+        "width": 520,
+        "height": 240
+      }
+    },
+    {
+      "id": "2e46fc34-0995-5842-86bc-2e5502250459",
+      "name": "Webhook : envoi demandé",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        80
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "send-reply",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "7d0f4f63-3c1e-4d0f-a51a-5e3f1b0c9a11"
+    },
+    {
+      "id": "f1401729-51e6-5b6b-b621-536b0fdceadb",
+      "name": "Vérifier secret + signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first().json;\nconst h = item.headers || {};\nconst body = item.body || {};\nconst secret = $env.WEBHOOK_SECRET || '';\nconst safeEq = (a, b) => {\n  const x = Buffer.from(String(a)), y = Buffer.from(String(b));\n  return x.length === y.length && crypto.timingSafeEqual(x, y);\n};\n// The backend signs compact JSON, identical to JSON.stringify of the parsed body\nconst expected = 'sha256=' + crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');\nconst valid = !!secret && safeEq(h['x-webhook-secret'] || '', secret) && safeEq(h['x-signature'] || '', expected);\nreturn [{ json: { valid, ...body } }];"
+      }
+    },
+    {
+      "id": "25c9afcc-2379-5edd-84e3-a98c49f7738f",
+      "name": "Requête authentique ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        180,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.valid }}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "c79aa8ba-6b76-54c7-8fdb-615f222d6d20",
+      "name": "Répondre 202",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        -20
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true, reply_id: $json.reply_id }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "a595805a-1470-5e9c-beaa-6597cf0c9ee2",
+      "name": "Répondre 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'unauthorized' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "0b824836-3db6-5ce1-aca2-b94e7cfbe8b7",
+      "name": "Construire le MIME",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "const b = $input.first().json;\nconst encWord = s => '=?UTF-8?B?' + Buffer.from(s, 'utf8').toString('base64') + '?=';\nconst headers = [\n  `To: ${b.to}`,\n  `Subject: ${encWord(b.subject)}`,\n  'MIME-Version: 1.0',\n  'Content-Type: text/plain; charset=\"UTF-8\"',\n  'Content-Transfer-Encoding: base64',\n];\nif (b.in_reply_to) headers.push(`In-Reply-To: ${b.in_reply_to}`);\nif (b.references) headers.push(`References: ${b.references}`);\nconst bodyB64 = Buffer.from(b.body, 'utf8').toString('base64').replace(/.{76}/g, '$&\\r\\n');\nconst mime = headers.join('\\r\\n') + '\\r\\n\\r\\n' + bodyB64;\nconst raw = Buffer.from(mime, 'utf8').toString('base64').replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');\nreturn [{ json: { reply_id: b.reply_id, request: JSON.stringify({ raw, threadId: b.gmail_thread_id }) } }];"
+      }
+    },
+    {
+      "id": "959dbfe2-7426-5fd9-8436-10b1f9dcdd1a",
+      "name": "Gmail : envoyer dans le fil",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.request }}"
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "5b11ee07-faa2-5e7d-9fd0-f72eff9a577a",
+      "name": "Signer : envoyé",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst replyId = $('Construire le MIME').first().json.reply_id;\nconst payload = JSON.stringify({ status: 'sent', gmail_message_id: $json.id || null });\nreturn [{ json: { payload, signature: sign(payload), reply_id: replyId } }];"
+      }
+    },
+    {
+      "id": "a3d61a93-95dc-55da-9401-cb86c771871f",
+      "name": "Signer : échec",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1060,
+        80
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst sign = (payload) => 'sha256=' + crypto.createHmac('sha256', $env.WEBHOOK_SECRET).update(payload).digest('hex');\nconst replyId = $('Construire le MIME').first().json.reply_id;\nconst err = ($json.error && ($json.error.message || $json.error.description)) || 'Erreur Gmail';\nconst payload = JSON.stringify({ status: 'failed', error: String(err).slice(0, 300) });\nreturn [{ json: { payload, signature: sign(payload), reply_id: replyId } }];"
+      }
+    },
+    {
+      "id": "03e84f03-5853-53b4-b23b-4291d08b0a7a",
+      "name": "Backend : statut de l'envoi",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        -20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BACKEND_URL }}/api/webhooks/n8n/replies/{{ $json.reply_id }}/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Webhook-Secret",
+              "value": "={{ $env.WEBHOOK_SECRET }}"
+            },
+            {
+              "name": "X-Signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.payload }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook : envoi demandé": {
+      "main": [
+        [
+          {
+            "node": "Vérifier secret + signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vérifier secret + signature": {
+      "main": [
+        [
+          {
+            "node": "Requête authentique ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Requête authentique ?": {
+      "main": [
+        [
+          {
+            "node": "Répondre 202",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Répondre 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Répondre 202": {
+      "main": [
+        [
+          {
+            "node": "Construire le MIME",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construire le MIME": {
+      "main": [
+        [
+          {
+            "node": "Gmail : envoyer dans le fil",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail : envoyer dans le fil": {
+      "main": [
+        [
+          {
+            "node": "Signer : envoyé",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Signer : échec",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : envoyé": {
+      "main": [
+        [
+          {
+            "node": "Backend : statut de l'envoi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signer : échec": {
+      "main": [
+        [
+          {
+            "node": "Backend : statut de l'envoi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "MailErrorHandl01"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
